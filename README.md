@@ -42,6 +42,6 @@
 ---
 
 ## 📬 Контакты
-```Автор: @Vandallov
+```Автор: @Vandallov```
 
 ![image](https://github.com/user-attachments/assets/1630697c-3b77-4e51-9ff1-f9d8640fc6a5)
