@@ -1,37 +1,32 @@
 import asyncio
 import logging
 import sys
-from datetime import datetime, timedelta
+import re
+import time
+import os
+from docx import Document
+from datetime import datetime, timedelta, date
 from aiogram import Bot, Dispatcher, types, F, Router
 from aiogram.types import ReplyKeyboardMarkup, KeyboardButton, FSInputFile, Message, InlineKeyboardButton, InlineKeyboardMarkup, CallbackQuery
-from aiogram.filters import Command, CommandStart
+from aiogram.filters import Command, CommandStart, StateFilter
 from aiogram.fsm.storage.memory import MemoryStorage
 from aiogram.fsm.state import State, StatesGroup
 from aiogram.fsm.context import FSMContext
-from openpyxl import load_workbook  # type: ignore # для работы с Excel
-from datetime import date, datetime, timedelta
-import pytz  # type: ignore # для работы с часовыми поясами
-import pandas as pd  # type: ignore # если используете для обработки данных
-import asyncio
-import logging
-import os
-
-from aiogram import Bot, Dispatcher, types
-from aiogram.filters import Command
 from aiogram.exceptions import TelegramBadRequest, TelegramForbiddenError
-from aiogram.fsm.context import FSMContext
-from aiogram.fsm.state import StatesGroup, State
-from aiogram.filters import StateFilter
-
+from openpyxl import load_workbook
+import pytz
+import pandas as pd 
+from collections import defaultdict
 
 file_path = 'file.xlsx'
 df = pd.read_excel('file.xlsx')
-API_TOKEN = 'Ваш API токен' #Вставьте токен
+API_TOKEN = 'Токен' #Вставьте токен
 Bot = Bot(token=API_TOKEN,request_timeout=300)
 dp = Dispatcher()
 awaiting_file = False
-user_id_to_notify = "963729102"
-ADMIN_ID = 963729102
+user_id_to_notify = "ID админа"
+ADMIN_ID = ID админа
+ADMIN_ID2 = ID админа2
 days_mapping = {
     'пн': 'Понедельник',
     'вт': 'Вторник',
@@ -42,13 +37,22 @@ days_mapping = {
     'вс': 'Воскресенье'
 }
 
-
+user_data = defaultdict(dict)
 
 main_keyboard = ReplyKeyboardMarkup(keyboard=[
-    [KeyboardButton(text='Завтра'),KeyboardButton(text='Сегодня')],
-    [KeyboardButton(text='День недели'),KeyboardButton(text='Все расписание'),KeyboardButton(text='Какая неделя')],
-    [KeyboardButton(text='Группа'),KeyboardButton(text='Преподаватели'),KeyboardButton(text='Обратная связь')]
+    [KeyboardButton(text='Завтра'),KeyboardButton(text='Сегодня'),KeyboardButton(text='Какая неделя')],
+    [KeyboardButton(text='Все расписание'),KeyboardButton(text='День недели')],
+    [KeyboardButton(text='Доп. функции'),KeyboardButton(text='Преподаватели')],
+    [KeyboardButton(text='Группа'),KeyboardButton(text='Обратная связь')]
 ], resize_keyboard=True, input_field_placeholder='Выберите пункт меню...')
+
+dop_panel = ReplyKeyboardMarkup(keyboard=[
+    [KeyboardButton(text='Расписание преподавателя'),KeyboardButton(text='Расписание кабинетов')],
+    [KeyboardButton(text='Создать титульный лист')],
+    [KeyboardButton(text='Назад')]
+], resize_keyboard=True, input_field_placeholder='Выберите пункт меню...')
+
+
 
 otmena = ReplyKeyboardMarkup(keyboard=[
     [KeyboardButton(text='Отмена')],
@@ -68,8 +72,13 @@ chet_nechet = ReplyKeyboardMarkup(keyboard=[
     
 ], resize_keyboard=True, input_field_placeholder='Чет или нечет...')
 
-
-days_of_week_keyboard = ReplyKeyboardMarkup(keyboard=[
+prepod_k= ReplyKeyboardMarkup(keyboard=[
+    [KeyboardButton(text='Да'),KeyboardButton(text='Нет')],
+    [KeyboardButton(text='Назад')]
+    
+], resize_keyboard=True, input_field_placeholder='Верно?')
+nech_days_of_week_keyboard = ReplyKeyboardMarkup(keyboard=[
+    [KeyboardButton(text='⬇️ Неч ⬇️')],
     [KeyboardButton(text='Понедельник'),KeyboardButton(text='Вторник')],
     [KeyboardButton(text='Среда'),KeyboardButton(text='Четверг')],
     [KeyboardButton(text='Пятница'),KeyboardButton(text='Суббота')],
@@ -77,19 +86,34 @@ days_of_week_keyboard = ReplyKeyboardMarkup(keyboard=[
 ], resize_keyboard=True, input_field_placeholder='Выберите день...')
 
 
+ch_days_of_week_keyboard = ReplyKeyboardMarkup(keyboard=[
+    [KeyboardButton(text='⬇️ Чет ⬇️')],
+    [KeyboardButton(text='Понедельник'),KeyboardButton(text='Вторник')],
+    [KeyboardButton(text='Среда'),KeyboardButton(text='Четверг')],
+    [KeyboardButton(text='Пятница'),KeyboardButton(text='Суббота')],
+    [KeyboardButton(text='Назад')]
+], resize_keyboard=True, input_field_placeholder='Выберите день...')
 
+
+prep=""
 user_ids = []
 router = Router(name=__name__)
 tasks = {}  
 user_groups = {}
+ch_spis = {}
 register = []
 group_list = []
+prepod= []
 waiting_for_file = 0
 waiting_for_group = False
 USERS_FILE = "users.txt"
 USERS_NEW = "user_new.txt"
 day = None
 id = 0
+sch=0
+k1=""
+k2=""
+group=""
 id_pip=1
 def get_users_ids():
     """Загружает ID пользователей из файла."""
@@ -113,14 +137,15 @@ def save_user_id(user_id):
 
 def save_user_new(e_user_new):
     global USERS_NEW
-    
-    # Читаем все существующие пользователи из файла
+    text_found = False
     with open(USERS_NEW, "r") as f:
-        existing_users = set(line.strip() for line in f.readlines())
-    
-    # Проверяем, существует ли пользователь
-    if e_user_new not in existing_users:
-        # Если нет, добавляем его в файл
+        for line in f:
+            if e_user_new in line:
+                text_found = True
+                break  # Прерываем цикл при первом совпадении
+
+# Если текст не найден ни в одной строке - добавляем
+    if not text_found:
         with open(USERS_NEW, "a") as f:
             f.write(e_user_new + "\n")
 
@@ -143,18 +168,443 @@ class BroadcastState(StatesGroup):
     svaz= State()
     Message_from_human= State()
     Message_from_human2= State()
+    faind = State()
+    kab1=State()
+    kab2=State()
+    titul1=State()
+    titul2=State()
+    titul3=State()
+    titul4=State()
+    titul5=State()
+    titul6=State()
+    titul7=State()
 
 
+@dp.message(F.text == 'Отмена', StateFilter('*'))
+async def process_group(message: types.Message, state: FSMContext):
+    await message.answer("Действие отменено",reply_markup=main_keyboard)
+    await state.clear()
 
+@dp.message(F.text == 'Создать титульный лист')
+async def process_group(message: types.Message, state: FSMContext):
+    await message.answer("Чтобы создать титульник, отвечай на вопросы по порядку",reply_markup=otmena)
+    await message.answer("Введи название дисциплины:")
+    await state.set_state(BroadcastState.titul1)
 
-
-@dp.message(F.text == '/start')
-async def start(message: types.Message, state: FSMContext):
-    await message.answer("Добро пожаловать в расписание КИТ !Рад тебя видеть!", reply_markup=main_keyboard)
+@dp.message(StateFilter(BroadcastState.titul1))
+async def process_group(message: types.Message, state: FSMContext):
+    if not message.text:
+        await message.answer("Лучше введи текстом!")
+        return
     user_id = message.from_user.id
+    user_data[user_id]['diccheplina'] = str(message.text)
+    await state.clear()
+    await state.set_state(BroadcastState.titul2)
+    await message.answer("Введи тему работы:")
+@dp.message(StateFilter(BroadcastState.titul2))
+async def process_group(message: types.Message, state: FSMContext):
+    if not message.text:
+        await message.answer("Лучше введи текстом!")
+        return
+    user_id = message.from_user.id
+    user_data[user_id]['tema'] = str(message.text)
+    await state.clear()
+    await state.set_state(BroadcastState.titul3)
+    await message.answer("Введи тип работы (Лабораторная работа,Практическая работа и тд.):")
+
+
+@dp.message(StateFilter(BroadcastState.titul3))
+async def process_group(message: types.Message, state: FSMContext):
+    if not message.text:
+        await message.answer("Лучше введи текстом!")
+        return
+    user_id = message.from_user.id
+    user_data[user_id]['tip'] = str(message.text).upper()
+    await state.clear()
+    await state.set_state(BroadcastState.titul4)
+    await message.answer("Введи нумерацию работы:")
+
+@dp.message(StateFilter(BroadcastState.titul4))
+async def process_group(message: types.Message, state: FSMContext):
+    if not message.text:
+        await message.answer("Лучше введи текстом!")
+        return
+    user_id = message.from_user.id
+    user_data[user_id]['number'] = str(message.text)
+    await state.clear()
+    await state.set_state(BroadcastState.titul5)
+    await message.answer("Введи номер своей группы:")
+
+@dp.message(StateFilter(BroadcastState.titul5))
+async def process_group(message: types.Message, state: FSMContext):
+    if not message.text:
+        await message.answer("Лучше введи текстом!")
+        return
+    user_id = message.from_user.id
+    user_data[user_id]['gpyp'] = str(message.text)
+    await state.clear()
+    await state.set_state(BroadcastState.titul6)
+    await message.answer("Введи свое ФИО:")
+
+
+@dp.message(StateFilter(BroadcastState.titul6))
+async def process_group(message: types.Message, state: FSMContext):
+    if not message.text:
+        await message.answer("Лучше введи текстом!")
+        return
+    user_id = message.from_user.id
+    user_data[user_id]['famImaOtch'] = str(message.text)
+    await state.clear()
+    await state.set_state(BroadcastState.titul7)
+    await message.answer("Введи ФИО преподователя:")
+
+
+@dp.message(StateFilter(BroadcastState.titul7))
+async def process_group(message: types.Message, state: FSMContext):
+    if not message.text:
+        await message.answer("Лучше введи текстом!")
+        return
+    
+    user_id = message.from_user.id
+    user_data[user_id]['prepodFIO'] = str(message.text)
+    await state.clear()
+    
+    try:
+        doc = Document("title.docx")
+        replacements = {
+            "TYPE": user_data.get(user_id, {}).get('tip', "не установлено"),
+            "number": user_data.get(user_id, {}).get('number', "не установлено"),
+            "discipline": user_data.get(user_id, {}).get('diccheplina', "не установлено"),
+            "topic": user_data.get(user_id, {}).get('tema', "не установлено"),
+            "group": user_data.get(user_id, {}).get('gpyp', "не установлено"),
+            "FIO": user_data.get(user_id, {}).get('famImaOtch', "не установлено"),
+            "prepod": user_data.get(user_id, {}).get('prepodFIO', "не установлено")
+        }
+
+        for paragraph in doc.paragraphs:
+            # Работаем с отдельными частями текста (runs)
+            for run in paragraph.runs:
+                original_text = run.text
+                for key, value in replacements.items():
+                    if key in original_text:
+                        # Заменяем текст с сохранением форматирования
+                        run.text = original_text.replace(key, value)
+        namemm=user_data.get(user_id, {}).get('famImaOtch', "не установлено")
+        doc.save(f"{namemm}.docx")
+        await message.answer("Держи свой титульник:",reply_markup=main_keyboard)
+        await message.answer_document(types.FSInputFile(f"{namemm}.docx"))
+        os.remove(f"{namemm}.docx")
+        await state.clear()
+    except Exception as e:
+        await message.answer(f"Ошибка: {str(e)}")
+        await state.clear()
+    
+
+
+@dp.message(F.text == 'Отмена',StateFilter(BroadcastState.faind) or StateFilter(BroadcastState.kab1) or StateFilter(BroadcastState.kab2))
+async def process_group(message: types.Message, state: FSMContext):
+    await message.answer("Действие отменено",reply_markup=main_keyboard)
+    await state.clear()
+
+
+@dp.message(F.text == 'Доп. функции')
+async def start(message: types.Message, state: FSMContext):
+    await message.answer("Выбери пункт меню:",reply_markup=dop_panel)
+
+
+@dp.message(F.text == 'Расписание кабинетов')
+async def start(message: types.Message, state: FSMContext):
+    await message.answer("Укажи здание, где находится кабинет:",reply_markup=otmena)
+    await state.set_state(BroadcastState.kab1)
+
+@dp.message(StateFilter(BroadcastState.kab1))
+async def start(message: types.Message, state: FSMContext):
+    global k1
+    if not(message.text):
+        await message.answer("Давай лучше текстом :/")
+        return
+    try:
+        df = pd.read_excel('file.xlsx')
+        df = df.sort_values(by='Время')
+    except:
+        df['Время'] = pd.to_datetime(df['Время'], format='%H:%M:%S') 
+        df = df.sort_values(by='Время')
+    k1s=[]
+    a=-1
+    while True:
+        try:
+            kabinet = df.iloc[a][df.columns[7]]
+            if (str(message.text).lower())[0].isdigit():
+                if str(message.text).lower() == (str(kabinet)).lower():
+                    k1=(str(kabinet)).rstrip()
+                    k1s.append(k1)
+                a=a+1
+            else:
+                if str(message.text).lower() in (str(kabinet)).lower():
+                    k1=(str(kabinet)).rstrip()
+                    k1s.append(k1)
+                a=a+1
+        except:
+            break
+    if k1s==[]:
+        await message.answer(f"Не нашел такого здания в расписании")
+        return
+    await message.answer(f"Твое здание - {k1}")
+    await message.answer(f"А теперь введи номер кабинета (например 219 или 219а):")
+    await state.clear()
+    await state.set_state(BroadcastState.kab2)
+
+@dp.message(StateFilter(BroadcastState.kab2))
+async def start(message: types.Message, state: FSMContext):
+    global k2
+    global k1
+    global days_mapping
+    if not(message.text):
+        await message.answer("Давай лучше текстом :/")
+        return
+    try:
+        df = pd.read_excel('file.xlsx')
+        df = df.sort_values(by='Время')
+    except:
+        df['Время'] = pd.to_datetime(df['Время'], format='%H:%M:%S') 
+        df = df.sort_values(by='Время')
+    k2s=[]
+    a=-1
+    while True:
+        try:
+            kabinet = df.iloc[a][df.columns[6]]
+            if (str(message.text).lower())[0].isdigit():
+                if str(message.text).lower() == str(kabinet).lower():
+                    k2=(str(kabinet)).rstrip()
+                    k2s.append(k2)
+                    break
+                a=a+1
+            else:
+                if str(message.text).lower() in str(kabinet).lower():
+                    k2=(str(kabinet)).rstrip()
+                    k2s.append(k2)
+                    break
+                a=a+1
+        except:
+            break
+    if k2s==[]:
+        await message.answer(f"Не нашел такого кабинета в расписании")
+        return
+    await message.answer(f"Кабинет - {k2}\nЗдание - {k1}")
+    await state.clear()
+    a=-1
+    d=0
+    q=0
+    R2=""
+    days = ['пн', 'вт', 'ср', 'чт', 'пт', 'сб']
+    day = days[d]
+    for i in range(6):
+        day = days[d]
+        while True:
+            try:
+                kab=(str(df.iloc[a][df.columns[6]]))
+                zdanie=str(df.iloc[a][df.columns[7]])
+                if k2 in kab and k1 in zdanie and (str(df.iloc[a][df.columns[1]])).rstrip() == str(day):
+                    time=(str(df.iloc[a][df.columns[2]]))[:5]
+                    group222=(str(df.iloc[a][df.columns[0]]))[:4]
+                    ch_nech = (df.iloc[a][df.columns[3]])
+                    lec_pr= (str(df.iloc[a][df.columns[5]])).rstrip()
+                    if {str(ch_nech)} == {'nan'}: 
+                        ch_nech = "чет/неч"  
+                    if ch_nech != "чет/неч":
+                        if "неч" in ch_nech:
+                            ch_nech="неч"
+                        elif "чет" in ch_nech:
+                            ch_nech="чет"
+                        else: ch_nech=str(ch_nech[:10])
+                    para=df.iloc[a][df.columns[4]]
+                    prepod = df.iloc[a][df.columns[9]]
+                    if q==0:
+                        R1=f"➤{days_mapping[day]}\n➤{k2}_{k1}\n\n➤<b>{ch_nech}</b>🕘{time}\n<b>{para}</b>({lec_pr})({group222})\n{k2}_{k1}зд.\n{prepod}\n"
+                        q=1
+                    else:
+                        R1=f"➤<b>{ch_nech}</b>🕘{time}\n<b>{para}</b>({lec_pr})({group222})\n{k2}_{k1}зд.\n{prepod}"
+                    R2=R2+R1
+                    a=a+1
+                else:
+                    a=a+1
+            except:
+                break
+        q=0
+        d=d+1
+        a=-1
+        try:
+            if len(R2) > 4000:
+                first_part = R2[:4000]
+                second_part = R2[4000:]
+                await message.answer(first_part, parse_mode='HTML')
+                await message.answer(second_part, parse_mode='HTML')   
+            else:
+                await message.answer(R2, parse_mode='HTML')   
+        except Exception as e:
+            vvv=f"➤{days_mapping[day]}\n\nЗанятий нет"
+            await message.answer(vvv, parse_mode='HTML') 
+        R1=""
+        R2=""
+    await message.answer("Выбери пункт меню",reply_markup=main_keyboard)
+
+
+@dp.message(F.text == 'Расписание преподавателя')
+async def start(message: types.Message, state: FSMContext):
+    await message.answer("Введи ФИО преподавателя:",reply_markup=otmena)
+    await state.set_state(BroadcastState.faind)
+
+
+@dp.message(F.text == "Назад",StateFilter(BroadcastState.faind))
+async def start(message: types.Message, state: FSMContext):
+    await message.answer('Выбери пункт...', reply_markup=main_keyboard)
+    user_id = message.from_user.id
+    
+    global group
     e_user_new=f"@{message.from_user.username} ID: {user_id}"
     save_user_new(e_user_new)
     save_user_id(user_id)
+    if user_id not in user_ids:
+        user_ids.append(user_id)
+        await Bot.send_message(user_id_to_notify, f"Зарегистрирован @{message.from_user.username}\nID: {user_id}")
+    await state.clear()
+
+@dp.message(F.text == "Нет",StateFilter(BroadcastState.faind))
+async def start(message: types.Message, state: FSMContext):
+    await message.answer("Проверь, правильно ли написано ФИО\nЕсли не помнишь его полностью, попробуй ввести только фамилию, фамилию и имя,отчество и тд. ",reply_markup=otmena)
+
+
+@dp.message(F.text == "Да",StateFilter(BroadcastState.faind))
+async def start(message: types.Message, state: FSMContext):
+    global prep
+    try:
+        df = pd.read_excel('file.xlsx')
+        df = df.sort_values(by='Время')
+    except:
+        df['Время'] = pd.to_datetime(df['Время'], format='%H:%M:%S') 
+        df = df.sort_values(by='Время')
+    a=-1 #Номера строк
+    b=9 #Номера столбцов
+    d=0 #номер дня недели
+    q=1 #только 1 раз ввести день недели 
+    R_3=""
+    j=0
+    days = ['пн', 'вт', 'ср', 'чт', 'пт', 'сб']
+    day = days[d]
+    x = 0 #Только 1 раз ввести и группу и день недели
+    number_group = df.iloc[a][df.columns[9]]
+    for i in range(6):
+        while j == 0:
+            try:
+                if {str(number_group)} == {str(prep)}:
+                    day_k = (df.iloc[a][df.columns[1]])[:2]
+                    ch_nech = df.iloc[a][df.columns[3]]
+                    global days_mapping
+                    if {str(ch_nech)} == {'nan'}: ch_nech = "чет/неч"  
+                    if ch_nech != "чет/неч":
+                        if "неч" in ch_nech:
+                            ch_nech="неч"
+                        elif "чет" in ch_nech:
+                            ch_nech="чет"
+                        else: ch_nech=str(ch_nech[:10])
+                    if {str(day_k)} == {str(day)} :
+                        time=(str(df.iloc[a][df.columns[2]]))[:5]
+                        para= df.iloc[a][df.columns[4]]
+                        lec_pr= df.iloc[a][df.columns[5]]
+                        if lec_pr.startswith("л."):
+                            lec_pr=lec_pr[:4]  # Оставляем первые 4 символа
+                        elif lec_pr.startswith("лек"):
+                            lec_pr=lec_pr[:3]  # Оставляем первые 3 символа
+                        elif lec_pr.startswith("пр"):
+                            lec_pr=lec_pr[:2]  # Оставляем первые 2 символа
+                        kab= (str(df.iloc[a][df.columns[6]])).rstrip()
+                        group222 = df.iloc[a][df.columns[0]]
+                        zdanie= (str(df.iloc[a][df.columns[7]])).rstrip()
+                        if x == 0:
+                            day_k = days_mapping[day_k]
+                            R_1=f"➤{day_k}\n➤{prep}\n\n"
+                            x=x+1
+                        else:
+                            if q==0:
+                                day_k = days_mapping[day_k]
+                                R_1=f"➤{day_k}\n"
+                                q=q+1
+                            else:
+                                R_1=''
+                        R_2=f"{R_1}➤ <b>{ch_nech}</b> 🕘 <b>{time}</b>\n<b>({group222}){para}</b>({lec_pr})\n{kab}_{zdanie}зд."
+                        R_3=f"{R_3}\n{R_2}"               
+                a=a+1
+                number_group = df.iloc[a][df.columns[9]] 
+            except IndexError as e:
+                print("Конец")
+                j=1 
+                q=0
+                a=-1
+        try:
+            await message.answer(R_3, parse_mode='HTML')   
+        except Exception as e:
+            vvv=f"➤{days_mapping[day]}\n\nЗанятий нет"
+            await message.answer(vvv, parse_mode='HTML')   
+        
+
+
+        d=d+1
+        j=0
+        R_3=""
+        days = ['пн', 'вт', 'ср', 'чт', 'пт', 'сб']
+        try:
+            day = days[d]
+        except:
+            x=x
+    user_id = message.from_user.id
+    df = pd.read_excel('file.xlsx')
+    await state.clear()
+    await message.answer("Выбери пункт меню",reply_markup=main_keyboard)
+
+    
+
+
+
+
+
+
+@dp.message(StateFilter(BroadcastState.faind))
+async def start(message: types.Message, state: FSMContext):
+    xls = pd.ExcelFile(file_path)
+    h=[]
+    s=0
+    global prep
+    for sheet_name in xls.sheet_names:
+        df = pd.read_excel(xls, sheet_name=sheet_name)
+        # Проходим по всем ячейкам в DataFrame
+        for row in range(df.shape[0]):
+            for col in range(df.shape[1]):
+                # Проверяем, содержит ли ячейка искомый текст
+                if message.text.upper() in str(df.iat[row, col]):
+                    # Выводим адрес ячейки
+                    cell_address = f"{chr(65 + col)}{row + 1}"  # Преобразуем индекс столбца в букву
+                    if df.iat[row, col] not in h and s==0:
+                        prep=df.iat[row, col]
+                        await message.answer(f'Я правильно понял?\nФИО: {prep}',reply_markup=prepod_k)
+                        h.append(df.iat[row, col])
+                        s=s+1
+    if h == []:
+        await message.answer("Данный переподователь не найден,попробуй проверить написание ФИО",reply_markup=otmena)
+
+@dp.message(F.text == '/start')
+async def start(message: types.Message, state: FSMContext):
+    global ADMIN_ID2
+    global ADMIN_ID
+    if message.from_user.id == ADMIN_ID2:
+        await message.answer("Добро пожаловать, матурым-татарка😉!\nРад тебя видеть!💋 Пусть день у тебя пройдет хорошо, твой Степа тебя обожает конечно же!!!", reply_markup=main_keyboard)
+    else:
+        await message.answer("Добро пожаловать в расписание КИТ! Рад тебя видеть!", reply_markup=main_keyboard)
+    user_id = message.from_user.id
+    global group
+    e_user_new=f"@{message.from_user.username} ID: {user_id}"
+    save_user_new(e_user_new)
+    save_user_id(user_id)
+    await state.clear()
     if user_id not in user_ids:
         user_ids.append(user_id)
         await Bot.send_message(user_id_to_notify, f"Зарегистрирован @{message.from_user.username}\nID: {user_id}")
@@ -166,6 +616,7 @@ async def start(message: types.Message, state: FSMContext):
 async def start_grup(message: types.Message, state: FSMContext):
     await message.answer("Введите номер группы:")
     user_id = message.from_user.id
+    global group
     e_user_new=f"@{message.from_user.username} ID: {user_id}"
     save_user_new(e_user_new)
     save_user_id(user_id)
@@ -181,6 +632,7 @@ async def start_grup(message: types.Message, state: FSMContext):
 @dp.message(lambda message: str(message.text).startswith('4'),StateFilter(BroadcastState.select_group))
 async def process_group(message: types.Message, state: FSMContext):
     a=1
+    global group
     global group_list
     while True:
         try:
@@ -196,24 +648,57 @@ async def process_group(message: types.Message, state: FSMContext):
         if message.text in group_list:
             group = message.text
             user_groups[message.from_user.id] = group
+            group=user_groups[message.from_user.id]
             await message.answer(f"Я запомнил твою группу! Теперь выбери, что именно ты хочешь узнать",reply_markup=main_keyboard)
             await state.clear()
         else:
             await message.answer(f"Данной группы нет в расписании,попробуй еще раз :/")
+            return
     else:
         await message.answer(f"Введите группу коректно,попробуй еще раз :/")
+        return
     user_id = message.from_user.id
+    
     e_user_new=f"@{message.from_user.username} ID: {user_id}"
     save_user_new(e_user_new)
     save_user_id(user_id)
     if user_id not in user_ids:
         user_ids.append(user_id)
         await Bot.send_message(user_id_to_notify, f"Зарегистрирован @{message.from_user.username}\nID: {user_id}")
+    with open(USERS_NEW, 'r+', encoding='utf-8') as file:
+        # Читаем все строки файла
+        lines = file.readlines()
+        # Подготавливаем файл для перезаписи
+        file.seek(0)
+        file.truncate()
+
+        # Ищем строки с целевым текстом 
+        target_lines = []
+        for idx, line in enumerate(lines):
+            if e_user_new in line:
+                target_lines.append(idx)
+
+        # Модифицируем найденные строки
+        for line_num in target_lines:
+            # Убираем символ переноса строки для обработки
+            clean_line = lines[line_num].rstrip('\n')
             
+            # Проверяем окончание на скобку и длину строки
+            if clean_line.endswith(')') and len(clean_line) >= 6:
+                clean_line = clean_line[:-7]  # Удаляем последние 6 символов 
+            
+            # Добавляем группу и возвращаем перенос строки
+            modified_line = f"{clean_line} ({group})\n"
+            lines[line_num] = modified_line
+
+        # Записываем изменения обратно в файл
+        file.writelines(lines)              
 @dp.message(F.text == "Назад")
 async def start(message: types.Message, state: FSMContext):
     await message.answer('Выбери пункт...', reply_markup=main_keyboard)
     user_id = message.from_user.id
+    
+    global group
     e_user_new=f"@{message.from_user.username} ID: {user_id}"
     save_user_new(e_user_new)
     save_user_id(user_id)
@@ -228,6 +713,7 @@ async def start(message: types.Message, state: FSMContext):
 async def process_group(message: types.Message, state: FSMContext):
     await message.answer("Выбери четность недели:",reply_markup=chet_nechet)
     user_id = message.from_user.id
+    global group
     e_user_new=f"@{message.from_user.username} ID: {user_id}"
     save_user_new(e_user_new)
     save_user_id(user_id)
@@ -239,6 +725,8 @@ async def process_group(message: types.Message, state: FSMContext):
 
 @dp.message(F.text == "Общее")
 async def process_group(message: types.Message, state: FSMContext):
+    global group
+    user_id = message.from_user.id
     group = user_groups.get(message.from_user.id, "Не введена")
     if group == "Не введена":
         await message.answer("Для начала введи группу:")
@@ -248,7 +736,7 @@ async def process_group(message: types.Message, state: FSMContext):
         await state.set_state(BroadcastState.select_group)
         return
 
-    a=-1 #Номера строк
+    a=-1#Номера строк
     b=0 #Номера столбцов
     d=0 #номер дня недели
     q=1 #только 1 раз ввести день недели 
@@ -256,77 +744,52 @@ async def process_group(message: types.Message, state: FSMContext):
     j=0
     days = ['пн', 'вт', 'ср', 'чт', 'пт', 'сб']
     day = days[d]
-    
-    x = 0 #Только 1 раз ввести и группу и день недели
-    number_group = df.iloc[a][df.columns[1]]
+    global days_mapping
+    x = 0 #Только 1 раз ввести и группу, и день недели
+    number_group = df.iloc[a][df.columns[0]]
     for i in range(6):
         while j == 0:
             try:
                 if {str(number_group)} == {str(group)}:
-                    b=b+1
-                    R1 = df.iloc[a][df.columns[b]]
-                    b=b+2
-                    R3 = df.iloc[a][df.columns[b]]
-                    R3=str(R3)
-                    global days_mapping
-                    if {str(R3)} == {'nan'}:   
-                            R3 = "чет/неч"
-                    if R3 != "чет/неч":
-                        R3 = R3[:3]
-                    if len(R1) > 2:
-                        R1 = R1[:2]
-                    if {str(R1)} == {str(day)} :
-                        
-                        
-                        b=b-1
-                        R2 = df.iloc[a][df.columns[b]]
-                        R2=str(R2)
-                        R2=R2[:5]
-                        b=b+2
-                        R4 = df.iloc[a][df.columns[b]]
-                        b=b+1
-                        R5 = df.iloc[a][df.columns[b]]
-                        if R5.startswith("л."):
-                            R5=R5[:4]  # Оставляем первые 4 символа
-                        elif R5.startswith("лек"):
-                            R5=R5[:3]  # Оставляем первые 3 символа
-                        elif R5.startswith("пр"):
-                            R5=R5[:2]  # Оставляем первые 2 символа
-                        b=b+1
-                        R6 = df.iloc[a][df.columns[b]]
-                        b=b+1
-                        R7 = df.iloc[a][df.columns[b]]
-                        R7=str(R7)
-                        if R7.startswith("КСК"):  # Проверяем, начинается ли строка с "КСК"
-                            R7=R7[:3]
-                        R6=str(R6)
-                        if R6.startswith("КСК КАИ ОЛИМП"):  # Проверяем, начинается ли строка с "КСК"
-                            R6=R6[:13]
+                    day_k = (str(df.iloc[a][df.columns[1]]))[:2]
+                    ch_nech = str(df.iloc[a][df.columns[3]])
+                    if {str(ch_nech)} == {'nan'}:   
+                        ch_nech = "чет/неч"
+                    if ch_nech != "чет/неч":
+                        if "неч" in ch_nech: ch_nech="неч"
+                        elif "чет" in ch_nech: ch_nech="чет"
+                        else: ch_nech=str(ch_nech[:10])
+                    if {str(day_k)} == {str(day)} :
+                        time = (str(df.iloc[a][df.columns[2]]))[:5]
+                        para = df.iloc[a][df.columns[4]]
+                        lec_pr = df.iloc[a][df.columns[5]]
+                        if lec_pr.startswith("л."):lec_pr=lec_pr[:4]
+                        elif lec_pr.startswith("лек"):  lec_pr=lec_pr[:3] 
+                        elif lec_pr.startswith("пр"):  lec_pr=lec_pr[:2]
+                        kab = str(df.iloc[a][df.columns[6]])
+                        zdanie = str(df.iloc[a][df.columns[7]])
+                        if zdanie.startswith("КСК"):  # Проверяем, начинается ли строка с "КСК"
+                            zdanie=zdanie[:3]
+                        if kab.startswith("КСК КАИ ОЛИМП"):  # Проверяем, начинается ли строка с "КСК"
+                            kab=kab[:13]
                         else:
-                            R6=R6[:4]
-                        b=b+2
-                        R8 = df.iloc[a][df.columns[b]]
+                            kab=kab[:4]
+                        prepod = df.iloc[a][df.columns[9]]
                         if x == 0:
-                            R1 = days_mapping[R1]
-                            R_1=f"➤{R1}\n➤{group}\n\n"
+                            day_k = days_mapping[day_k]
+                            R_1=f"➤{day_k}\n➤{group}\n➤{ch_nech}\n\n"
                             x=x+1
                         else:
                             if q==0:
-                                R1 = days_mapping[R1]
-                                R_1=f"➤{R1}\n"
+                                day_k = days_mapping[day_k]
+                                R_1=f"➤{day_k}\n"
                                 q=q+1
-
                             else:
                                 R_1=''
-                        R_2=f"{R_1}➤ <b>{R3}</b> 🕘 <b>{R2}</b>\n<b>{R4}</b>({R5})\n{R6}_{R7}зд.\n{R8}"
+                        R_2=f"{R_1}➤ <b>{ch_nech}</b> 🕘 <b>{time}</b>\n<b>{para}</b>({lec_pr})\n{kab}_{zdanie}зд.\n{prepod}"
                         R_3=f"{R_3}\n{R_2}"
-                        b=b-9
-                        
-                    else:
-                        b=b-3
-                
                 a=a+1
-                number_group = df.iloc[a][df.columns[b]] 
+                number_group = df.iloc[a][df.columns[0]] 
             except IndexError as e:
                 print("Конец")
                 
@@ -334,7 +797,11 @@ async def process_group(message: types.Message, state: FSMContext):
                 q=0
                 
                 a=-1
-        await message.answer(R_3, parse_mode='HTML')   
+        try:
+            await message.answer(R_3, parse_mode='HTML')   
+        except Exception as e:
+            vvv=f"➤{days_mapping[day]}\n\nЗанятий нет"
+            await message.answer(vvv, parse_mode='HTML')   
         d=d+1
         j=0
         R_3=""
@@ -344,6 +811,7 @@ async def process_group(message: types.Message, state: FSMContext):
         except:
             x=x
     user_id = message.from_user.id
+    
     e_user_new=f"@{message.from_user.username} ID: {user_id}"
     save_user_new(e_user_new)
     save_user_id(user_id)
@@ -357,36 +825,109 @@ async def process_group(message: types.Message, state: FSMContext):
     await state.clear()
 
 
+async def forward_to_admin(user_id: int, message: types.Message):
+    """Пересылает сообщение админу с информацией о пользователе"""
+    try:
+        # Отправляем информацию о пользователе
+        user_info = f"Обращение от @{message.from_user.username}\nID: {user_id}\n"
+        
+        # Пересылаем оригинальное сообщение с сохранением форматирования
+        if message.text:
+            await Bot.send_message(
+                chat_id=user_id_to_notify,
+                text=user_info + message.text,
+                entities=message.entities
+            )
+        elif message.photo:
+            await Bot.send_photo(
+                chat_id=user_id_to_notify,
+                photo=message.photo[-1].file_id,
+                caption=user_info + message.caption if message.caption else user_info,
+                caption_entities=message.caption_entities
+            )
+        elif message.video:
+            await Bot.send_video(
+                chat_id=user_id_to_notify,
+                video=message.video.file_id,
+                caption=user_info + message.caption if message.caption else user_info,
+                caption_entities=message.caption_entities
+            )
+        elif message.document:
+            await Bot.send_document(
+                chat_id=user_id_to_notify,
+                document=message.document.file_id,
+                caption=user_info + message.caption if message.caption else user_info,
+                caption_entities=message.caption_entities
+            )
+        # Добавьте другие типы медиа по аналогии
+        else:
+            await Bot.send_message(
+                chat_id=user_id_to_notify,
+                text=user_info + "⚠️ Получен неподдерживаемый тип сообщения"
+            )
+
+    except Exception as e:
+        logging.error(f"Ошибка пересылки сообщения админу: {e}")
+
 @dp.message(StateFilter(BroadcastState.obrashenie))
 async def process_group(message: types.Message, state: FSMContext):
     user_id = message.from_user.id
-    await Bot.send_message(user_id_to_notify, f"@{message.from_user.username}\nID: {user_id}\nОбращение:\n{message.text}")
-    await message.answer("Спасибо за обратную связь!",reply_markup=main_keyboard)
-    await state.clear()
-    user_id = message.from_user.id
-    e_user_new=f"@{message.from_user.username} ID: {user_id}"
-    save_user_new(e_user_new)
-    save_user_id(user_id)
-    if user_id not in user_ids:
-        user_ids.append(user_id)
-        await Bot.send_message(user_id_to_notify, f"Зарегистрирован @{message.from_user.username}\nID: {user_id}")
+    try:
+        # Пересылаем сообщение админу
+        await forward_to_admin(user_id, message)
+        
+        # Отправляем подтверждение пользователю
+        await message.answer("Спасибо за обратную связь!", reply_markup=main_keyboard)
+        
+        # Регистрация пользователя
+        e_user_new = f"@{message.from_user.username} ID: {user_id}"
+        save_user_new(e_user_new)
+        save_user_id(user_id)
+        
+        if user_id not in user_ids:
+            user_ids.append(user_id)
+            await Bot.send_message(
+                user_id_to_notify, 
+                f"Зарегистрирован @{message.from_user.username}\nID: {user_id}"
+            )
 
+    except TelegramForbiddenError:
+        logging.info(f"Пользователь {user_id} заблокировал бота.")
+        remove_user_id(user_id)
+    except Exception as e:
+        logging.error(f"Ошибка обработки обратной связи: {e}")
+    finally:
+        await state.clear()
 
 @dp.message(F.text == "Обратная связь")
 async def process_group(message: types.Message, state: FSMContext):
-    await message.answer("Мы рады услышать тебя! Оставь свои комментарии,вопросы или отзывы, и мы постараемся ответить как можно скорее",reply_markup=otmena)
+    await message.answer(
+        "Мы рады услышать тебя! Оставь свои комментарии,вопросы или отзывы, и мы постараемся ответить как можно скорее",
+        reply_markup=otmena
+    )
+    
+    # Регистрация пользователя
     user_id = message.from_user.id
-    e_user_new=f"@{message.from_user.username} ID: {user_id}"
+    e_user_new = f"@{message.from_user.username} ID: {user_id}"
     save_user_new(e_user_new)
     save_user_id(user_id)
+    
     if user_id not in user_ids:
         user_ids.append(user_id)
-        await Bot.send_message(user_id_to_notify, f"Зарегистрирован @{message.from_user.username}\nID: {user_id}")
+        await Bot.send_message(
+            user_id_to_notify, 
+            f"Зарегистрирован @{message.from_user.username}\nID: {user_id}"
+        )
+    
     await state.set_state(BroadcastState.obrashenie)
+
+
 @dp.message(F.text == "Нечетная")
 @dp.message(F.text == "Четная")
 async def process_group(message: types.Message, state: FSMContext):
     user_id = message.from_user.id
+    global group
+    global days_mapping
     e_user_new=f"@{message.from_user.username} ID: {user_id}"
     save_user_new(e_user_new)
     save_user_id(user_id)
@@ -411,76 +952,53 @@ async def process_group(message: types.Message, state: FSMContext):
     else:
         week_type = "неч"
     x = 0 #Только 1 раз ввести и группу и день недели
-    number_group = df.iloc[a][df.columns[1]]
+    number_group = df.iloc[a][df.columns[0]]
     for i in range(6):
         while j == 0:
             try:
                 if {str(number_group)} == {str(group)}:
-                    b=b+1
-                    R1 = df.iloc[a][df.columns[b]]
-                    b=b+2
-                    R3 = df.iloc[a][df.columns[b]]
-                    R3=str(R3)
-                    global days_mapping
-                    if {str(R3)} == {'nan'}:   
-                            R3 = "чет/неч"
-                    if R3 != "чет/неч":
-                        R3 = R3[:3]
-                    if len(R1) > 2:
-                        R1 = R1[:2]
-                    if {str(R1)} == {str(day)} :
-                        
-                        if R3 == week_type or R3 == "чет/неч":
-                            b=b-1
-                            R2 = df.iloc[a][df.columns[b]]
-                            R2=str(R2)
-                            R2=R2[:5]
-                            b=b+2
-                            R4 = df.iloc[a][df.columns[b]]
-                            b=b+1
-                            R5 = df.iloc[a][df.columns[b]]
-                            if R5.startswith("л."):
-                                R5=R5[:4]  # Оставляем первые 4 символа
-                            elif R5.startswith("лек"):
-                                R5=R5[:3]  # Оставляем первые 3 символа
-                            elif R5.startswith("пр"):
-                                R5=R5[:2]  # Оставляем первые 2 символа
-                            b=b+1
-                            R6 = df.iloc[a][df.columns[b]]
-                            b=b+1
-                            R7 = df.iloc[a][df.columns[b]]
-                            R7=str(R7)
-                            if R7.startswith("КСК"):  # Проверяем, начинается ли строка с "КСК"
-                                R7=R7[:3]
-                            R6=str(R6)
-                            if R6.startswith("КСК КАИ ОЛИМП"):  # Проверяем, начинается ли строка с "КСК"
-                                R6=R6[:13]
+                    day_k = (str(df.iloc[a][df.columns[1]]))[:2]
+                    ch_nech = str(df.iloc[a][df.columns[3]])
+                    if {ch_nech} == {'nan'}:   
+                        ch_nech = "чет/неч"
+                    if ch_nech != "чет/неч":
+                        if "неч" in ch_nech:ch_nech="неч"
+                        elif "чет" in ch_nech:ch_nech="чет"
+                        else: ch_nech=str(ch_nech[:10])
+                    spisok_ch_nech="чет/неч"
+                    if {str(day_k)} == {str(day)} :
+                        if str(ch_nech) == str(week_type) or str(ch_nech) == "чет/неч" or ch_nech not in spisok_ch_nech:
+                            time = (str(df.iloc[a][df.columns[2]]))[:5]
+                            para = df.iloc[a][df.columns[4]]
+                            lec_pr = df.iloc[a][df.columns[5]]
+                            if lec_pr.startswith("л."):lec_pr=lec_pr[:4]  
+                            elif lec_pr.startswith("лек"):lec_pr=lec_pr[:3] 
+                            elif lec_pr.startswith("пр"):lec_pr=lec_pr[:2]
+                            kab = df.iloc[a][df.columns[6]]
+                            zdanie = str(df.iloc[a][df.columns[7]])
+                            if zdanie.startswith("КСК"):  # Проверяем, начинается ли строка с "КСК"
+                                zdanie=zdanie[:3]
+                            kab=str(kab)
+                            if kab.startswith("КСК КАИ ОЛИМП"):  # Проверяем, начинается ли строка с "КСК"
+                                kab=kab[:13]
                             else:
-                                R6=R6[:4]
-                            b=b+2
-                            R8 = df.iloc[a][df.columns[b]]
+                                kab=kab[:4]
+                            prepod = df.iloc[a][df.columns[9]]
                             if x == 0:
-                                R1 = days_mapping[R1]
-                                R_1=f"➤{R1}\n➤{group}\n\n"
+                                day_k = days_mapping[day_k]
+                                R_1=f"➤{day_k}\n➤{group}\n➤{ch_nech}\n\n"
                                 x=x+1
                             else:
                                 if q==0:
-                                    R1 = days_mapping[R1]
-                                    R_1=f"➤{R1}\n"
+                                    day_k = days_mapping[day_k]
+                                    R_1=f"➤{day_k}\n"
                                     q=q+1
-
                                 else:
                                     R_1=''
-                            R_2=f"{R_1}➤ <b>{R3}</b> 🕘 <b>{R2}</b>\n<b>{R4}</b>({R5})\n{R6}_{R7}зд.\n{R8}"
+                            R_2=f"{R_1}➤ <b>{ch_nech}</b> 🕘 <b>{time}</b>\n<b>{para}</b>({lec_pr})\n{kab}_{zdanie}зд.\n{prepod}"
                             R_3=f"{R_3}\n{R_2}"
-                            b=b-9
-                        else:
-                            b=b-3
-                    else:
-                        b=b-3
-                
                 a=a+1
-                number_group = df.iloc[a][df.columns[b]] 
+                number_group = df.iloc[a][df.columns[0]] 
             except IndexError as e:
                 print("Конец")
                 print(week_type)
@@ -488,7 +1006,11 @@ async def process_group(message: types.Message, state: FSMContext):
                 q=0
                 
                 a=-1
-        await message.answer(R_3, parse_mode='HTML')   
+        try:
+            await message.answer(R_3, parse_mode='HTML')   
+        except Exception as e:
+            vvv=f"➤{days_mapping[day]}\n\nЗанятий нет"
+            await message.answer(vvv, parse_mode='HTML')   
         d=d+1
         j=0
         R_3=""
@@ -497,10 +1019,46 @@ async def process_group(message: types.Message, state: FSMContext):
             day = days[d]
         except:
             x=x
+dn=""
+@dp.message(F.text == "⬇️ Неч ⬇️")
+@dp.message(F.text == "⬇️ Чет ⬇️")
+async def process_group(message: types.Message, state: FSMContext):
+    if message.text=="⬇️ Неч ⬇️":
+        dn ="чет"
+        ch_spis[message.from_user.id] = dn
+        dn=ch_spis[message.from_user.id]
+        await message.answer(f"Тип недели изменен на Четная ✅",reply_markup=ch_days_of_week_keyboard)
+    elif message.text=="⬇️ Чет ⬇️":
+        dn ="неч"
+        ch_spis[message.from_user.id] = dn
+        dn=ch_spis[message.from_user.id]
+        await message.answer(f"Тип недели изменен на Нечетная ✅",reply_markup=nech_days_of_week_keyboard)
+
+        
+
+
 @dp.message(F.text == "День недели")
 async def process_group(message: types.Message, state: FSMContext):
-    await message.answer("Выберите день недели",reply_markup=days_of_week_keyboard)
+    start_date = datetime(2025, 1, 20)
+    time_shift = timedelta(hours=3)
+    today = datetime.now() + time_shift
+    weeks_difference = (today - start_date).days // 7
+    if today < start_date:
+        week_type = "неделя не определена до 20.01.2025"
+    else:
+        week_type = "Четная" if weeks_difference % 2 == 0 else "Нечетная"
+    if week_type == "Четная":
+        await message.answer("Выбери день недели",reply_markup=ch_days_of_week_keyboard)
+        dn ="чет"
+        ch_spis[message.from_user.id] = dn
+        dn=ch_spis[message.from_user.id]
+    else:
+        await message.answer("Выбери день недели",reply_markup=nech_days_of_week_keyboard)
+        dn ="неч"
+        ch_spis[message.from_user.id] = dn
+        dn=ch_spis[message.from_user.id]
     user_id = message.from_user.id
+    global group
     e_user_new=f"@{message.from_user.username} ID: {user_id}"
     save_user_new(e_user_new)
     save_user_id(user_id)
@@ -511,12 +1069,16 @@ async def process_group(message: types.Message, state: FSMContext):
 @dp.message(F.text == "Iluz")
 @dp.message(F.text == "iluz")
 async def process_group(message: types.Message, state: FSMContext):
-        if message.from_user.id == 963729102 or message.from_user.id == 1624096187:
+        global ADMIN_ID2
+        global ADMIN_ID
+        if message.from_user.id == ADMIN_ID or message.from_user.id == ADMIN_ID2:
             await message.answer("Добро пожаловать в ADMIN панель",reply_markup=admin_panel)
 
 @dp.message(F.text == 'Сообщение пользователю')
 async def start(message: types.Message, state: FSMContext):
-    if message.from_user.id == 963729102 or message.from_user.id == 1624096187:
+    global ADMIN_ID2
+    global ADMIN_ID
+    if message.from_user.id == ADMIN_ID or message.from_user.id == ADMIN_ID2:
         await message.answer("Введи ID пользователя")
         await state.set_state(BroadcastState.Message_from_human)
 
@@ -539,33 +1101,112 @@ async def start(message: types.Message, state: FSMContext):
         await state.clear()
 
 async def send_message_to_user(user_id, message):
-    """Отправляет сообщение пользователю."""
+    """Отправляет сообщение пользователю с сохранением форматирования и поддерживает различные типы сообщений."""
     try:
+        # Для текстовых сообщений с сущностями (жирный, курсив и т.д.)
         if message.text:
-            await Bot.send_message(user_id, message.text)
+            await Bot.send_message(
+                chat_id=user_id,
+                text=message.text,
+                entities=message.entities
+            )
+        
+        # Фото с подписью и сущностями подписи
         elif message.photo:
-            if message.caption:
-                await Bot.send_photo(user_id, message.photo[-1].file_id, caption=message.caption)
-            else:
-                await Bot.send_photo(user_id, message.photo[-1].file_id)
+            await Bot.send_photo(
+                chat_id=user_id,
+                photo=message.photo[-1].file_id,
+                caption=message.caption,
+                caption_entities=message.caption_entities
+            )
+        
+        # Видео
         elif message.video:
-            if message.caption:
-                await Bot.send_video(user_id, message.video.file_id, caption=message.caption)
-            else:
-                await Bot.send_video(user_id, message.video.file_id)
+            await Bot.send_video(
+                chat_id=user_id,
+                video=message.video.file_id,
+                caption=message.caption,
+                caption_entities=message.caption_entities
+            )
+        
+        # Голосовые сообщения
         elif message.voice:
-            await Bot.send_voice(user_id, message.voice.file_id)
+            await Bot.send_voice(
+                chat_id=user_id,
+                voice=message.voice.file_id
+            )
+        
+        # Документы
         elif message.document:
-            if message.caption:
-                await Bot.send_document(user_id, message.document.file_id, caption=message.caption)
-            else:
-                await Bot.send_document(user_id, message.document.file_id)
+            await Bot.send_document(
+                chat_id=user_id,
+                document=message.document.file_id,
+                caption=message.caption,
+                caption_entities=message.caption_entities
+            )
+        
+        # Аудио
+        elif message.audio:
+            await Bot.send_audio(
+                chat_id=user_id,
+                audio=message.audio.file_id,
+                caption=message.caption,
+                caption_entities=message.caption_entities
+            )
+        
+        # Стикеры
+        elif message.sticker:
+            await Bot.send_sticker(
+                chat_id=user_id,
+                sticker=message.sticker.file_id
+            )
+        
+        # Анимации (GIF)
+        elif message.animation:
+            await Bot.send_animation(
+                chat_id=user_id,
+                animation=message.animation.file_id,
+                caption=message.caption,
+                caption_entities=message.caption_entities
+            )
+        
+        # Локация
+        elif message.location:
+            await Bot.send_location(
+                chat_id=user_id,
+                latitude=message.location.latitude,
+                longitude=message.location.longitude
+            )
+        
+        # Контакты
+        elif message.contact:
+            await Bot.send_contact(
+                chat_id=user_id,
+                phone_number=message.contact.phone_number,
+                first_name=message.contact.first_name,
+                last_name=message.contact.last_name
+            )
+        
+        # Опросы
+        elif message.poll:
+            await Bot.send_poll(
+                chat_id=user_id,
+                question=message.poll.question,
+                options=[opt.text for opt in message.poll.options],
+                is_anonymous=message.poll.is_anonymous,
+                type=message.poll.type
+            )
+        
+        # Неподдерживаемые типы
         else:
-            await Bot.send_message(user_id, 'Данный тип сообщений не поддерживается')
+            await Bot.send_message(
+                chat_id=user_id,
+                text='Данный тип сообщений не поддерживается'
+            )
 
     except TelegramForbiddenError:
         logging.info(f"Пользователь {user_id} заблокировал бота.")
-        remove_user_id(user_id)  # Удаляем заблокировавшего пользователя
+        remove_user_id(user_id)
     except TelegramBadRequest as e:
         logging.error(f"Ошибка отправки пользователю {user_id}: {e}")
     except Exception as e:
@@ -612,7 +1253,9 @@ async def confirm_broadcast_handler(message: types.Message, state: FSMContext):
 
 @dp.message(lambda message: message.text == "Поменять файл")
 async def process_change_file(message: types.Message, state: FSMContext):
-    if message.from_user.id == 963729102 or message.from_user.id == 1624096187:
+    global ADMIN_ID2
+    global ADMIN_ID
+    if message.from_user.id == ADMIN_ID or message.from_user.id == ADMIN_ID2:
         global waiting_for_file
         if not waiting_for_file:
             waiting_for_file = 1
@@ -624,7 +1267,9 @@ async def process_change_file(message: types.Message, state: FSMContext):
 
 @dp.message(F.content_type.in_({'document', 'file', 'video', 'video_note', 'audio'}),StateFilter(BroadcastState.iluz))
 async def handle_file(message: types.Message, state: FSMContext):
-    if message.from_user.id == 963729102 or message.from_user.id == 1624096187:
+    global ADMIN_ID2
+    global ADMIN_ID
+    if message.from_user.id == ADMIN_ID or message.from_user.id == ADMIN_ID2:
         global waiting_for_file
         global file_path
         global df
@@ -656,19 +1301,35 @@ async def handle_file(message: types.Message, state: FSMContext):
 
 @dp.message(F.text == "id учасников")
 async def process_group(message: types.Message, state: FSMContext):
-    if message.from_user.id == 963729102 or message.from_user.id == 1624096187:
+    global ADMIN_ID
+    global ADMIN_ID2
+    if message.from_user.id == ADMIN_ID or message.from_user.id == ADMIN_ID2:
         USERS_FILE = "users.txt"
         USERS_NEW = "user_new.txt"  # Укажите путь к вашему текстовому файлу
         if os.path.exists(USERS_FILE):
             with open(USERS_FILE, 'r', encoding='utf-8') as file:
-                file_content = file.read()
+                lines = file.readlines()
+            
+            try:
+                await message.answer(''.join(lines))
+            except:
+                first_100_lines = lines[:100]
+                remaining_lines = lines[100:]
+                await message.answer(''.join(first_100_lines))
+                await message.answer(''.join(remaining_lines))
 
-            await message.answer(file_content)
+            
+
         if os.path.exists(USERS_NEW):
             with open(USERS_NEW, 'r', encoding='utf-8') as file:
-                file_content = file.read()
-
-            await message.answer(file_content)
+                lines = file.readlines()
+            try:
+                await message.answer(''.join(lines))
+            except:
+                first_100_lines = lines[:100]
+                remaining_lines = lines[100:]
+                await message.answer(''.join(first_100_lines))
+                await message.answer(''.join(remaining_lines))
     else:
         await message.answer("Файл не найден.")
 
@@ -687,15 +1348,12 @@ async def process_group(message: types.Message, state: FSMContext):
     anser=f"➤Преподаватели\n"
     Rw_spis=[]
     h=[] #тест
-    number_group = df.iloc[a][df.columns[b]]
     while True:
         try:
-            number_group = df.iloc[a][df.columns[b]]
+            number_group = df.iloc[a][df.columns[0]]
             if {str(number_group)} == {str(group)}:
-                b=b+4
-                para = df.iloc[a][df.columns[b]]
-                b=b+1
-                type = df.iloc[a][df.columns[b]]
+                para = df.iloc[a][df.columns[4]]
+                type = df.iloc[a][df.columns[5]]
                 if type.startswith("л."):
                     type=type[:4]  # Оставляем первые 4 символа
                 elif type.startswith("лек"):
@@ -704,18 +1362,14 @@ async def process_group(message: types.Message, state: FSMContext):
                     type=type[:2]  
                 para_spis.append(para)
                 b=b+4
-                prepod = df.iloc[a][df.columns[b]]
+                prepod = df.iloc[a][df.columns[9]]
                 prepod = ' '.join(word.capitalize() for word in prepod.lower().split())
                 Rw=f"▎• <b>{para}({type})</b>\n   {prepod}\n"
                 if str(Rw) not in Rw_spis:
                     Rw_spis.append(str(Rw))
                     Rw=str(Rw)
                     h.append(Rw)
-                    
-                b=b-9
-                
             a=a+1
-                 
         except IndexError as e:
             print("Конец")
             break 
@@ -739,6 +1393,7 @@ async def process_group(message: types.Message, state: FSMContext):
         week_type = "Четная" if weeks_difference % 2 == 0 else "Нечетная"
     await message.answer(week_type)
     user_id = message.from_user.id
+    global group
     e_user_new=f"@{message.from_user.username} ID: {user_id}"
     save_user_new(e_user_new)
     save_user_id(user_id)
@@ -749,6 +1404,7 @@ async def process_group(message: types.Message, state: FSMContext):
 @dp.message(F.text == "Завтра")
 @dp.message(F.text == "Сегодня")
 async def process_group(message: types.Message, state: FSMContext):
+    global group
     group = user_groups.get(message.from_user.id, "Не введена")
     if group == "Не введена":
         await message.answer("Для начала введи группу:")
@@ -759,17 +1415,14 @@ async def process_group(message: types.Message, state: FSMContext):
     elif message.text == "Завтра":
         dayss=1
     group = user_groups.get(message.from_user.id, "Не введена")
-
     a=-1 #Номера строк
     b=0 #Номера столбцов
     d=0 #номер дня недели
     q=1 #только 1 раз ввести день недели 
     R_3=""
-
     moscow_tz = pytz.timezone('Europe/Moscow')
     today = datetime.now(moscow_tz)
     tomorrow = today + timedelta(0)
-    
     day_of_week = tomorrow.weekday()
     
     days = ['пн', 'вт', 'ср', 'чт', 'пт', 'сб', 'вс']
@@ -791,90 +1444,81 @@ async def process_group(message: types.Message, state: FSMContext):
             week_type = "неделя не определена до 20.01.2025"
         else:
             week_type = "чет" if weeks_difference % 2 == 0 else "неч"
-        
         x = 0
-        a=-1
+        a=0
         b=0
-        a=-1 #Номера строк
         if message.text == "Завтра" and t_day == "вс":
             if week_type == "чет":
                 week_type = "неч"
             else:
                 week_type = "чет"
-        number_group = df.iloc[a][df.columns[1]]
+        number_group = df.iloc[a][df.columns[0]]
+
         while True:
             try:
                 if {str(number_group)} == {str(group)}:
-                    b=b+1
-                    R1 = df.iloc[a][df.columns[b]]
-                    b=b+2
-                    R3 = df.iloc[a][df.columns[b]]
-                    R3=str(R3)
+                    day_k = str(df.iloc[a][df.columns[1]])
+                    day_k=day_k[:2]
+                    ch_nech = df.iloc[a][df.columns[3]]
+                    ch_nech=str(ch_nech)
                     global days_mapping
-                    if {str(R3)} == {'nan'}:   
-                            R3 = "чет/неч"
-                    if R3 != "чет/неч":
-                        R3 = R3[:3]
-                    if len(R1) > 2:
-                        R1 = R1[:2]
-                    if {str(R1)} == {str(day)} :
-                        
-                        if R3 == week_type or R3 == "чет/неч":
-                            b=b-1
-                            R2 = df.iloc[a][df.columns[b]]
-                            R2=str(R2)
-                            R2=R2[:5]
-                            b=b+2
-                            R4 = df.iloc[a][df.columns[b]]
-                            b=b+1
-                            R5 = df.iloc[a][df.columns[b]]
-                            if R5.startswith("л."):
-                                R5=R5[:4]  # Оставляем первые 4 символа
-                            elif R5.startswith("лек"):
-                                R5=R5[:3]  # Оставляем первые 3 символа
-                            elif R5.startswith("пр"):
-                                R5=R5[:2]  # Оставляем первые 2 символа
-                            b=b+1
-                            R6 = df.iloc[a][df.columns[b]]
-                            b=b+1
-                            R7 = df.iloc[a][df.columns[b]]
-                            R7=str(R7)
-                            if R7.startswith("КСК"):  # Проверяем, начинается ли строка с "КСК"
-                                R7=R7[:3]
-                            R6=str(R6)
-                            if R6.startswith("КСК КАИ ОЛИМП"):  # Проверяем, начинается ли строка с "КСК"
-                                R6=R6[:13]
+                    if {ch_nech} == {'nan'}:   
+                        ch_nech = "чет/неч"
+                    if ch_nech != "чет/неч":
+                        if "неч" in ch_nech:
+                            ch_nech="неч"
+                        elif "чет" in ch_nech:
+                            ch_nech="чет"
+                        else: ch_nech=str(ch_nech[:10])
+                    spisok_ch_nech="чет/неч"
+                    if {str(day_k)} == {str(day)} :
+                        if str(ch_nech) == str(week_type) or str(ch_nech) == "чет/неч" or ch_nech not in spisok_ch_nech:
+                            time = (str(df.iloc[a][df.columns[2]]))[:5]
+                            time=str(time)
+                            para = df.iloc[a][df.columns[4]]
+                            lec_pr = df.iloc[a][df.columns[5]]
+                            if lec_pr.startswith("л."):
+                                lec_pr=lec_pr[:4]  # Оставляем первые 4 символа
+                            elif lec_pr.startswith("лек"):
+                                lec_pr=lec_pr[:3]  # Оставляем первые 3 символа
+                            elif lec_pr.startswith("пр"):
+                                lec_pr=lec_pr[:2]  # Оставляем первые 2 символа
+                            kab = df.iloc[a][df.columns[6]]
+                            zdanie = df.iloc[a][df.columns[7]]
+                            zdanie=str(zdanie)
+                            if zdanie.startswith("КСК"):  # Проверяем, начинается ли строка с "КСК"
+                                zdanie=zdanie[:3]
+                            kab=str(kab)
+                            if kab.startswith("КСК КАИ ОЛИМП"):  # Проверяем, начинается ли строка с "КСК"
+                                kab=kab[:13]
                             else:
-                                R6=R6[:4]
+                                kab=kab[:4]
                             b=b+2
-                            R8 = df.iloc[a][df.columns[b]]
+                            prepod = df.iloc[a][df.columns[9]]
                             if x == 0:
-                                R1 = days_mapping[R1]
-                                R_1=f"➤{R1}\n➤{group}\n\n"
+                                day_k = days_mapping[day_k]
+                                R_1=f"➤{day_k}\n➤{group}\n➤{ch_nech}\n\n"
                                 x=x+1
                             else:
                                 if q==0:
-                                    R1 = days_mapping[R1]
-                                    R_1=f"➤{R1}"
+                                    day_k = days_mapping[day_k]
+                                    R_1=f"➤{day_k}"
                                 else:
                                     R_1=''
-                            R_2=f"{R_1}➤ <b>{R3}</b> 🕘 <b>{R2}</b>\n<b>{R4}</b>({R5})\n{R6}_{R7}зд.\n{R8}"
+                            R_2=f"{R_1}➤ <b>{ch_nech}</b> 🕘 <b>{time}</b>\n<b>{para}</b>({lec_pr})\n{kab}_{zdanie}зд.\n{prepod}"
                             R_3=f"{R_3}\n{R_2}"
-                            b=b-9
-                        else:
-                            b=b-3
-                    else:
-                        b=b-3
-                
                 a=a+1
-                number_group = df.iloc[a][df.columns[b]] 
+                number_group = df.iloc[a][df.columns[0]] 
             except IndexError as e:
-                print("Конец")
-                print(week_type)
                 break 
                 x = 0
-        await message.answer(R_3, parse_mode='HTML')
+        try:
+            await message.answer(R_3, parse_mode='HTML')   
+        except Exception as e:
+            vvv=f"➤{days_mapping[day]}\n\nЗанятий нет"
+            await message.answer(vvv, parse_mode='HTML')
         user_id = message.from_user.id
+        
         e_user_new=f"@{message.from_user.username} ID: {user_id}"
         save_user_new(e_user_new)
         save_user_id(user_id)
@@ -891,6 +1535,7 @@ async def process_group(message: types.Message, state: FSMContext):
         await state.set_state(BroadcastState.select_group)
         return
     global day
+    global days_mapping
     # Обновляем переменную day в зависимости от нажатой кнопки
     if message.text == 'Понедельник':
         day = 'пн'
@@ -904,97 +1549,71 @@ async def process_group(message: types.Message, state: FSMContext):
         day = 'пт'
     elif message.text == 'Суббота':
         day = 'сб'
-    group = user_groups.get(message.from_user.id, "Не введена")
     a = 0
     b = 0
-    time_shift = timedelta(hours=3)
-    today = datetime.now() + time_shift
-    number_group = df.iloc[a][df.columns[1]]
-    start_date = datetime(2025, 1, 20)
     a=-1 #Номера строк
-    b=0 #Номера столбцов
     d=0 #номер дня недели
     q=1 #только 1 раз ввести день недели 
     R_3=""
-    weeks_difference = (today - start_date).days // 7
-    if today < start_date:
-        week_type = "неделя не определена до 20.01.2025"
-    else:
-        week_type = "чет" if weeks_difference % 2 == 0 else "неч"
     x = 0
     a=-1
-    b=0
-    number_group = df.iloc[a][df.columns[1]]
+    dn = ch_spis.get(message.from_user.id, "Не введена")
+    if dn == "Не введена":
+        await message.answer("Ошибка нажми /start")
 
+    number_group = df.iloc[a][df.columns[0]]
     while True:
             try:
                 if {str(number_group)} == {str(group)}:
-                    b=b+1
-                    R1 = df.iloc[a][df.columns[b]]
-                    b=b+2
-                    R3 = df.iloc[a][df.columns[b]]
-                    R3=str(R3)
-                    global days_mapping
-                    if {str(R3)} == {'nan'}:   
-                            R3 = "чет/неч"
-                    if R3 != "чет/неч":
-                        R3 = R3[:3]
-                    if len(R1) > 2:
-                        R1 = R1[:2]
-                    if {str(R1)} == {str(day)} :
-                        
-                        if R3 == week_type or R3 == "чет/неч":
-                            b=b-1
-                            R2 = df.iloc[a][df.columns[b]]
-                            R2=str(R2)
-                            R2=R2[:5]
-                            b=b+2
-                            R4 = df.iloc[a][df.columns[b]]
-                            b=b+1
-                            R5 = df.iloc[a][df.columns[b]]
-                            if R5.startswith("л."):
-                                R5=R5[:4]  # Оставляем первые 4 символа
-                            elif R5.startswith("лек"):
-                                R5=R5[:3]  # Оставляем первые 3 символа
-                            elif R5.startswith("пр"):
-                                R5=R5[:2]  # Оставляем первые 2 символа
-                            b=b+1
-                            R6 = df.iloc[a][df.columns[b]]
-                            b=b+1
-                            R7 = df.iloc[a][df.columns[b]]
-                            R7=str(R7)
-                            if R7.startswith("КСК"):  # Проверяем, начинается ли строка с "КСК"
-                                R7=R7[:3]
-                            R6=str(R6)
-                            if R6.startswith("КСК КАИ ОЛИМП"):  # Проверяем, начинается ли строка с "КСК"
-                                R6=R6[:13]
+                    day_k = (str(df.iloc[a][df.columns[1]]))[:2]
+                    ch_nech = str(df.iloc[a][df.columns[3]])
+                    if {str(ch_nech)} == {'nan'}:   
+                        ch_nech = "чет/неч"
+                    if ch_nech != "чет/неч":
+                        if "неч" in ch_nech:
+                            ch_nech="неч"
+                        elif "чет" in ch_nech:
+                            ch_nech="чет"
+                        else: ch_nech=str(ch_nech[:10])
+                    spisok_ch_nech="чет/неч"
+                    if {str(day_k)} == {str(day)} :
+                        if ch_nech == dn or ch_nech == "чет/неч" or ch_nech not in spisok_ch_nech:
+                            time = (str(df.iloc[a][df.columns[2]]))[:5]
+                            para = df.iloc[a][df.columns[4]]
+                            lec_pr = df.iloc[a][df.columns[5]]
+                            if lec_pr.startswith("л."):
+                                lec_pr=lec_pr[:4]  # Оставляем первые 4 символа
+                            elif lec_pr.startswith("лек"):
+                                lec_pr=lec_pr[:3]  # Оставляем первые 3 символа
+                            elif lec_pr.startswith("пр"):
+                                lec_pr=lec_pr[:2]  # Оставляем первые 2 символа
+                            kab = df.iloc[a][df.columns[6]]
+                            zdanie = str(df.iloc[a][df.columns[7]])
+                            if zdanie.startswith("КСК"):  # Проверяем, начинается ли строка с "КСК"
+                                zdanie=zdanie[:3]
+                            kab=str(kab)
+                            if kab.startswith("КСК КАИ ОЛИМП"):  # Проверяем, начинается ли строка с "КСК"
+                                kab=kab[:13]
                             else:
-                                R6=R6[:4]
-                            b=b+2
-                            R8 = df.iloc[a][df.columns[b]]
+                                kab=kab[:4]
+                            prepod = df.iloc[a][df.columns[9]]
                             if x == 0:
-                                R1 = days_mapping[R1]
-                                R_1=f"➤{R1}\n➤{group}\n\n"
+                                day_k = days_mapping[day_k]
+                                R_1=f"➤{day_k}\n➤{group}\n➤{dn}\n\n"
                                 x=x+1
                             else:
                                 if q==0:
-                                    R1 = days_mapping[R1]
-                                    R_1=f"➤{R1}"
+                                    day_k = days_mapping[day_k]
+                                    R_1=f"➤{day_k}"
                                 else:
                                     R_1=''
-                            R_2=f"{R_1}➤ <b>{R3}</b> 🕘 <b>{R2}</b>\n<b>{R4}</b>({R5})\n{R6}_{R7}зд.\n{R8}"
+                            R_2=f"{R_1}➤ <b>{ch_nech}</b> 🕘 <b>{time}</b>\n<b>{para}</b>({lec_pr})\n{kab}_{zdanie}зд.\n{prepod}"
                             R_3=f"{R_3}\n{R_2}"
-                            b=b-9
-                        else:
-                            b=b-3
-                    else:
-                        b=b-3
-                
                 a=a+1
-                number_group = df.iloc[a][df.columns[b]] 
+                number_group = df.iloc[a][df.columns[0]] 
             except IndexError as e:
                 print("Конец")
-                print(week_type)
+                print(dn)
                 break 
                 x = 0
     await message.answer(R_3, parse_mode='HTML')
@@ -1005,11 +1624,11 @@ async def process_group(message: types.Message, state: FSMContext):
     if user_id not in user_ids:
         user_ids.append(user_id)
         await Bot.send_message(user_id_to_notify, f"Зарегистрирован @{message.from_user.username}\nID: {user_id}")
-
 @dp.message()
 async def process_group(message: types.Message):
     await message.answer("Не понимаю тебя, напиши /start")
     user_id = message.from_user.id
+    global group
     e_user_new=f"@{message.from_user.username} ID: {user_id}"
     save_user_new(e_user_new)
     save_user_id(user_id)
